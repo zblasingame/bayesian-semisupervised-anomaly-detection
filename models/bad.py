@@ -8,6 +8,7 @@ Lab:            CAMEL
 import tensorflow as tf
 import numpy as np
 import utils.datasets as ds
+from collections import namedtuple
 
 
 class BAD:
@@ -62,6 +63,10 @@ class BAD:
         Flag to always train pmf after training model, default True.
     save_path : str, optional
         Path to directory where models are saved, default '.models'
+    special_ops : dict, optional
+        Dictionary containing special operations, default is empty dict.
+        Note, the special_ops dict should not be altered!
+        The only valid use is to have it touched by the model generators.
     """
 
     def __init__(self, X, Y, model, model_name, pmf_model, pmf_name, **kwargs):
@@ -70,7 +75,8 @@ class BAD:
             'normalize': True,
             'debug': False,
             'always_train_pmf': True,
-            'save_path': '.models'
+            'save_path': '.models',
+            'special_ops': {}
         }
 
         vars(self).update({p: kwargs.get(p, d) for p, d in defaults.items()})
@@ -101,6 +107,17 @@ class BAD:
                 {p: dt.get(p, d) for p, d in self.pmf_params.items()}
             )
 
+        # Convert to namedtuples
+        self.model_params = namedtuple(
+            'Dict',
+            self.model_params.keys()
+        )(**self.model_params)
+
+        self.pmf_params = namedtuple(
+            'Dict',
+            self.pmf_params.keys()
+        )(**self.pmf_params)
+
         self.model_name = model_name
         self.pmf_name = pmf_name
 
@@ -123,9 +140,9 @@ class BAD:
             self.model_loss, self.scores = model(X)
 
         with tf.variable_scope(pmf_name):
-            # _in = tf.concat([tf.expand_dims(self.scores,1), X], 1)
-            _in = tf.expand_dims(self.scores, 1)
-            self.bayes_loss, pmf = pmf_model(_in)
+            self.pmf_in = tf.concat([tf.expand_dims(self.scores,1), X], 1)
+            # self.pmf_in = tf.expand_dims(self.scores, 1)
+            self.bayes_loss, pmf = pmf_model(self.pmf_in)
 
         # Find posterior
         uniform = tf.ones_like(pmf) * self.p_uniform
@@ -143,7 +160,7 @@ class BAD:
                 scope=model_name
             ))
             self.model_opt = tf.train.AdamOptimizer(
-                self.model_params['l_rate']
+                self.model_params.l_rate
             ).minimize(
                 self.model_loss,
                 var_list=tf.get_collection(
@@ -158,7 +175,7 @@ class BAD:
         ))
 
         self.bayes_opt = tf.train.AdamOptimizer(
-            self.pmf_params['l_rate']
+            self.pmf_params.l_rate
         ).minimize(
             self.bayes_loss,
             var_list=tf.get_collection(
@@ -199,14 +216,9 @@ class BAD:
             Input features, with shape like `self.X`.
         """
 
-        if self.model_loss is False:
-            if self.always_train_pmf:
-                self.train_pmf(X, ignore_norm=False, restore_model=False)
-            return
-
         training_size = X.shape[0]
 
-        assert self.model_params['batch_size'] < training_size, (
+        assert self.model_params.batch_size < training_size, (
             'batch size is larger than number of samples'
         )
 
@@ -221,12 +233,21 @@ class BAD:
                 sess.run(self.feature_min.assign(_min))
                 sess.run(self.feature_max.assign(_max))
 
-            batch = ds.random_batcher([X], self.model_params['batch_size'])
+            # Run special ops
+            for name, op in self.special_ops.items():
+                if 'train_model' in name:
+                    op(sess, X)
+
+            batch = ds.random_batcher([X], self.model_params.batch_size)
 
             self.print('Training {}'.format(self.model_name))
             self.print('Epoch | Loss')
 
-            for epoch in range(self.model_params['n_epochs']):
+            for epoch in range(self.model_params.n_epochs):
+                # Don't try on one-shot models
+                if self.model_loss is False:
+                    break
+
                 batch_x, = next(batch)
 
                 _, l = sess.run(
@@ -236,7 +257,7 @@ class BAD:
                     }
                 )
 
-                if epoch % self.model_params['display_step'] == 0:
+                if epoch % self.model_params.display_step == 0:
                     self.print('{0:05} | {1:7.5f}'.format(epoch+1, l))
 
             self.print('Finished training {}'.format(self.model_name))
@@ -251,7 +272,7 @@ class BAD:
         if self.always_train_pmf:
             self.train_pmf(X, ignore_norm=True)
 
-    def train_pmf(self, X, ignore_norm=False, restore_model=True):
+    def train_pmf(self, X, ignore_norm=False):
         """Train the density estimator.
 
         Parameters
@@ -260,24 +281,18 @@ class BAD:
             Input features, with shape like `self.X`.
         ignore_norm : bool, optional
             Ignore normalization, default is False.
-        restore_model : bool, optional
-            Restore scoring model, default is True.
         """
 
         training_size = X.shape[0]
 
-        assert self.pmf_params['batch_size'] < training_size, (
+        assert self.pmf_params.batch_size < training_size, (
             'Batch size is larger than number of samples'
         )
 
         with tf.Session(config=self.config) as sess:
             sess.run(self.init_op)
 
-            if restore_model:
-                self.saver.restore(
-                    sess,
-                    self.save_path.format(self.model_name)
-                )
+            self.saver.restore(sess, self.save_path.format(self.model_name))
 
             if self.normalize and not ignore_norm:
                 _min = X.min(axis=0)
@@ -287,9 +302,9 @@ class BAD:
                 sess.run(self.feature_min.assign(_min))
                 sess.run(self.feature_max.assign(_max))
 
-            # Find p_uniform
-            scores = sess.run(
-                self.scores,
+            # Find p_uniform and perform special ops
+            scores, pmf_in = sess.run(
+                [self.scores, self.pmf_in],
                 feed_dict={
                     self.X: X
                 }
@@ -297,12 +312,17 @@ class BAD:
 
             sess.run(self.p_uniform.assign(1/np.unique(scores).shape[0]))
 
-            batch = ds.random_batcher([X], self.pmf_params['batch_size'])
+            # Run special ops
+            for name, op in self.special_ops.items():
+                if 'train_pmf' in name:
+                    op(sess, pmf_in)
+
+            batch = ds.random_batcher([X], self.pmf_params.batch_size)
 
             self.print('Training {}'.format(self.pmf_name))
             self.print('Epoch | Loss')
 
-            for epoch in range(self.pmf_params['n_epochs']):
+            for epoch in range(self.pmf_params.n_epochs):
                 batch_x, = next(batch)
 
                 _, l = sess.run(
@@ -312,7 +332,7 @@ class BAD:
                     }
                 )
 
-                if epoch % self.pmf_params['display_step'] == 0:
+                if epoch % self.pmf_params.display_step == 0:
                     self.print('{0:05} | {1:7.5f}'.format(epoch+1, l))
 
             self.print('Finished training density estimator')
@@ -324,7 +344,7 @@ class BAD:
             )
             self.print('Model saved in file: {}'.format(save_path))
 
-    def test(self, X, Y, restore_model=True):
+    def test(self, X, Y):
         """Evaluate model performance.
 
         Parameters
@@ -333,8 +353,6 @@ class BAD:
             Input features, with shape like `self.X`.
         Y : np.ndarray
             Labels for each sample.
-        restore_model : bool, optional
-            Restore scoring model, default is True.
 
         Returns
         -------
@@ -345,12 +363,7 @@ class BAD:
         """
 
         with tf.Session(config=self.config) as sess:
-            if restore_model:
-                self.saver.restore(
-                    sess,
-                    self.save_path.format(self.model_name)
-                )
-
+            self.saver.restore(sess, self.save_path.format(self.model_name))
             self.saver.restore(sess, self.save_path.format(self.pmf_name))
 
             # normalize data
@@ -358,6 +371,8 @@ class BAD:
                 _min = self.feature_min.eval()
                 _max = self.feature_max.eval()
                 X = ds.rescale(X, _min, _max, -1, 1)
+
+            print(np.max(X))
 
             acc, mat = sess.run(
                 [self.accuracy, self.confusion_matrix],
@@ -371,6 +386,72 @@ class BAD:
             self.print(mat)
 
             return acc * 100, mat
+
+    def score(self, X):
+        """Return model scores.
+
+        Parameters
+        ----------
+        X : np.ndarray
+            Input features, with shape like `self.X`.
+
+        Returns
+        -------
+        scores : np.ndarray
+            Array of scores, with shape `X.shape[0]`.
+        """
+
+        with tf.Session(config=self.config) as sess:
+            self.saver.restore(sess, self.save_path.format(self.model_name))
+            self.saver.restore(sess, self.save_path.format(self.pmf_name))
+
+            # normalize data
+            if self.normalize:
+                _min = self.feature_min.eval()
+                _max = self.feature_max.eval()
+                X = ds.rescale(X, _min, _max, -1, 1)
+
+            scores = sess.run(
+                self.scores,
+                feed_dict={
+                    self.X: X,
+                }
+            )
+
+            return scores
+
+    def predict(self, X):
+        """Return module predictions from posterior distribution.
+
+        Parameters
+        ----------
+        X : np.ndarray
+            Input features, with shape like `self.X`.
+
+        Returns
+        -------
+        predictions : np.ndarray
+            Array of scores, with shape `X.shape[0]`.
+        """
+
+        with tf.Session(config=self.config) as sess:
+            self.saver.restore(sess, self.save_path.format(self.model_name))
+            self.saver.restore(sess, self.save_path.format(self.pmf_name))
+
+            # normalize data
+            if self.normalize:
+                _min = self.feature_min.eval()
+                _max = self.feature_max.eval()
+                X = ds.rescale(X, _min, _max, -1, 1)
+
+            preds = sess.run(
+                self.posterior,
+                feed_dict={
+                    self.X: X,
+                }
+            )
+
+            return preds
 
     def print(self, val):
         if self.debug:

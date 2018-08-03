@@ -9,15 +9,18 @@ Lab:            CAMEL
 import tensorflow as tf
 import numpy as np
 import models.models
+from sklearn.cluster import KMeans
 
 
-def gen_kde(n_inputs, reg_param=0.01, n_kernels=100):
+def gen_kde(n_inputs, special_ops, reg_param=0.01, n_kernels=100):
     """Creates function that generates KDE model.
 
     Parameters
     ----------
     n_inputs : int
         Number of inputs.
+    special_ops : dict
+        Dictionary where special operations can be added.
     reg_param : float, optional
         L2 regularization parameter, default 0.01.
     n_kernels : int optional
@@ -47,23 +50,32 @@ def gen_kde(n_inputs, reg_param=0.01, n_kernels=100):
             constraint=lambda x: tf.clip_by_value(x, 1e-9, np.infty)
         )
 
-        k_weights = tf.get_variable(
-            'k_weights',
-            n_kernels,
-            initializer=tf.random_normal_initializer(mean=0, stddev=0.1),
-            regularizer=tf.contrib.layers.l2_regularizer(reg_param)
+        # k_weights = tf.get_variable(
+        #     'k_weights',
+        #     n_kernels,
+        #     initializer=tf.random_normal_initializer(mean=0, stddev=0.1),
+        #     regularizer=tf.contrib.layers.l2_regularizer(reg_param)
+        # )
+
+        k_locs = tf.get_variable(
+            'k_locs',
+            [n_kernels, n_inputs],
+            trainable=False
+            # initializer=tf.random_normal_initializer(mean=0.5, stddev=0.25)
         )
 
-        k_loc = tf.get_variable(
-            'k_loc',
-            [n_kernels, n_inputs],
-            initializer=tf.random_normal_initializer(mean=0.5, stddev=0.25)
-        )
+        # Add cluster assignment to special ops
+        def op(sess, x):
+            kmeans = KMeans(n_clusters=n_kernels, n_jobs=-2)
+            kmeans.fit(x)
+            sess.run(k_locs.assign(kmeans.cluster_centers_))
+
+        special_ops['train_pmf/k_locs_assign'] = op
 
         dist = tf.transpose(
             tf.sqrt(tf.reduce_sum(tf.square(tf.subtract(
                 X,
-                tf.expand_dims(k_loc, 1)
+                tf.expand_dims(k_locs, 1)
             )), axis=2)),
             perm=[1,0]
         )
@@ -75,14 +87,14 @@ def gen_kde(n_inputs, reg_param=0.01, n_kernels=100):
 
         # Kernel shape [n_kernels, batch_size, n_inputs]
         # Weighted kernel
-        pmf = tf.reduce_sum(
-            tf.multiply(tf.nn.softmax(k_weights), kernel),
-            axis=1
-        )
-        # pmf = tf.reduce_mean(kernel, axis=1)
+        # pmf = tf.reduce_sum(
+        #     tf.multiply(tf.nn.softmax(k_weights), kernel),
+        #     axis=1
+        # )
+        pmf = tf.reduce_mean(kernel, axis=1)
         eps = 1e-15
         pmf = tf.clip_by_value(pmf, eps, 1-eps)
-        # pmf = tf.Print(pmf, [pmf, tf.reduce_sum(pmf)])
+        # pmf = tf.Print(pmf, [k_locs])
 
         # print('Shapes')
         # print(kernel)

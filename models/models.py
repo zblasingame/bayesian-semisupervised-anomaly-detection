@@ -171,6 +171,11 @@ def gen_ae(layers, activations, reg_param=0.01, drop_prob=False):
         loss, scores : tf.Tensor
             Tensors holding the output of the neural net and the loss.
     """
+
+    assert layers[0] == layers[-1], (
+        'Autoencoder end sizes are different!'
+    )
+
     def _ae(X):
         model = gen_fc_neural_net(layers, activations, reg_param, drop_prob)
         X_out = model(X)
@@ -181,13 +186,17 @@ def gen_ae(layers, activations, reg_param=0.01, drop_prob=False):
     return _ae
 
 
-def gen_knnd(X_ref, k=1):
+def gen_knn(n_features, special_ops, k=1):
     """Creates function that generates k-th nearest neighbour distance model.
+
+    Too much data crashes computer!!!!, wait to use.
 
     Parameters
     ----------
-    X_ref : np.ndarray
-        Reference samples to perform distance comparison.
+    n_features : int
+        Number of features.
+    special_ops : dict
+        Dictionary where special operations can be added.
     k : int, optional
         Nearest neighbour used for distance evaluation.
 
@@ -205,16 +214,24 @@ def gen_knnd(X_ref, k=1):
         -------
         scores, loss : tf.Tensor
             Tensors holding the output of the model.
-            Note the loss is False this model doesn't need
+            Note the loss is False as this model doesn't need
             to be trained.
     """
     def _knn(X):
-        X_r = tf.Variable(X_ref, dtype=tf.float32)
+        X_r = tf.Variable(
+            np.zeros((1, n_features)),
+            validate_shape=False,
+            dtype=tf.float32
+        )
 
         dist = tf.sqrt(tf.reduce_sum(tf.square(tf.subtract(
             X_r,
             tf.expand_dims(X, 1)
         )), axis=2))
+
+        special_ops['train_model/ref_x'] = lambda sess, x: sess.run(
+            tf.assign(X_r, x, validate_shape=False)
+        )
 
         top_k_vals, _ = tf.nn.top_k(tf.negative(dist), k=k)
         scores = tf.negative(top_k_vals[:, -1])
