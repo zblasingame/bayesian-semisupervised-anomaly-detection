@@ -53,6 +53,9 @@ class BAD:
             Size of mini-batches, default 100.
         l_rate : float, optional
             Learning rate, default 0.001.
+        mode : {'full', 'scores'}, optional
+            Whether the pmf model takes only scores or both
+            scores and features as input, default 'full'.
     p_isnorm : float, optional
         Probability sample is normal, default 0.5.
     normalize : bool, optional
@@ -92,7 +95,8 @@ class BAD:
             'n_epochs': 10,
             'display_step': 1,
             'batch_size': 100,
-            'l_rate': .001
+            'l_rate': .001,
+            'mode': 'full'
         }
 
         if 'model_params' in kwargs:
@@ -140,8 +144,15 @@ class BAD:
             self.model_loss, self.scores = model(X)
 
         with tf.variable_scope(pmf_name):
-            self.pmf_in = tf.concat([tf.expand_dims(self.scores,1), X], 1)
-            # self.pmf_in = tf.expand_dims(self.scores, 1)
+            # self.pmf_in = tf.concat([
+            #     tf.expand_dims(self.scores,1),
+            #     tf.reshape(X, [-1, np.multiply(X.get_shape()[1:])])
+            # ], 1)
+            if self.pmf_params.mode == 'full':
+                self.pmf_in = tf.concat([tf.expand_dims(self.scores, 1), X], 1)
+            else:
+                self.pmf_in = tf.expand_dims(self.scores, 1)
+
             self.bayes_loss, pmf = pmf_model(self.pmf_in)
 
         # Find posterior
